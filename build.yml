@@ -1,0 +1,193 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Create project
+        run: |
+          mkdir dubber && cd dubber
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Dubber"
+          include(":app")
+          EOF0
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF1
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF2'
+          android.useAndroidX=true
+          EOF2
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.dubber"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.dubber"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF3
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="دوبله با لینک"
+                  android:usesCleartextTraffic="true"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF4
+          mkdir -p $(dirname app/src/main/java/com/example/dubber/MainActivity.kt)
+          cat > app/src/main/java/com/example/dubber/MainActivity.kt <<'EOF5'
+          package com.example.dubber
+
+          import android.app.Activity
+          import android.app.DownloadManager
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Environment
+          import android.text.InputType
+          import android.view.View
+          import android.view.inputmethod.InputMethodManager
+          import android.webkit.URLUtil
+          import android.webkit.WebChromeClient
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+              private lateinit var server: EditText
+              private var sharedLink: String? = null
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val prefs = getSharedPreferences("p", Context.MODE_PRIVATE)
+
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(16, 16, 16, 16)
+                      layoutDirection = View.LAYOUT_DIRECTION_LTR
+                  }
+                  server = EditText(this).apply {
+                      hint = "http://192.168.1.10:8000"
+                      setText(prefs.getString("server", ""))
+                      inputType = InputType.TYPE_TEXT_VARIATION_URI
+                      setSingleLine()
+                  }
+                  val go = Button(this).apply { text = "اتصال" }
+                  bar.addView(server, LinearLayout.LayoutParams(0, -2, 1f))
+                  bar.addView(go)
+
+                  web = WebView(this).apply {
+                      settings.javaScriptEnabled = true
+                      settings.domStorageEnabled = true
+                      settings.mediaPlaybackRequiresUserGesture = false
+                      webViewClient = object : WebViewClient() {
+                          override fun onPageFinished(v: WebView, url: String) {
+                              sharedLink?.let {
+                                  v.evaluateJavascript(
+                                      "document.getElementById('u').value=${org.json.JSONObject.quote(it)}", null)
+                                  sharedLink = null
+                              }
+                          }
+                      }
+                      webChromeClient = WebChromeClient()
+                      setDownloadListener { url, ua, cd, mime, _ ->
+                          val r = DownloadManager.Request(Uri.parse(url))
+                              .setMimeType(mime)
+                              .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                              .setDestinationInExternalPublicDir(
+                                  Environment.DIRECTORY_MOVIES, URLUtil.guessFileName(url, cd, mime))
+                          (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(r)
+                      }
+                  }
+                  root.addView(bar)
+                  root.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
+                  setContentView(root)
+
+                  fun connect() {
+                      var u = server.text.toString().trim()
+                      if (u.isEmpty()) return
+                      if (!u.startsWith("http")) u = "http://$u"
+                      prefs.edit().putString("server", u).apply()
+                      (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+                          .hideSoftInputFromWindow(server.windowToken, 0)
+                      web.loadUrl(u)
+                  }
+                  go.setOnClickListener { connect() }
+                  handleShare(intent)
+                  if (server.text.isNotEmpty()) connect()
+              }
+
+              override fun onNewIntent(i: Intent) {
+                  super.onNewIntent(i)
+                  handleShare(i)
+                  if (server.text.isNotEmpty()) web.loadUrl(server.text.toString())
+              }
+
+              // اشتراک‌گذاری لینک از هر اپ (یوتیوب، مرورگر، ...) به این اپ
+              private fun handleShare(i: Intent?) {
+                  if (i?.action == Intent.ACTION_SEND) sharedLink = i.getStringExtra(Intent.EXTRA_TEXT)
+              }
+
+              override fun onBackPressed() { if (web.canGoBack()) web.goBack() else super.onBackPressed() }
+          }
+          EOF5
+      - name: Build
+        run: cd dubber && gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dubber-apk
+          path: dubber/app/build/outputs/apk/debug/app-debug.apk
